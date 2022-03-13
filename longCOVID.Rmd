@@ -1,0 +1,322 @@
+---
+title: "Impact of long-COVID on NBA point productivity"
+author: "Kent"
+date: "6/18/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache = TRUE)
+library(knitr)
+library(tidyverse)
+library(dplyr)
+library(rvest)
+library(igraph)
+library(lfe)
+library(kableExtra)
+library(nbastatR)
+library(dummies)
+library(MatchIt)
+library(quantreg)
+library(here)
+
+# clean environment
+rm(list = ls())
+```
+
+```{r clean the injury dataframe, message=FALSE}
+## Clean the injury dataframe
+
+NBACovidTable <- read.csv(here("data/NBACovidTable.csv"), 
+                          na.strings = c("NA",""," "))
+
+NBACovidTable <- filter(NBACovidTable, !is.na(Relinquished))
+
+
+### Get rid of non-alphanumeric symbols
+playerNames <- gsub("• ", "", NBACovidTable$Relinquished)
+
+NBACovidTable$Relinquished <- playerNames
+rm(playerNames)
+
+
+# Filter for notes containing COVID-19
+NBACovidTable <- NBACovidTable[grepl("COVID-19", NBACovidTable$Notes) |
+                                 grepl("protocols", NBACovidTable$Notes),]
+
+# Convert to date form
+NBACovidTable$Date <- as.Date(NBACovidTable$Date)
+
+# Just get the last date
+NBACovidTable <- NBACovidTable %>% 
+  group_by(Relinquished) %>%
+  arrange(Date) %>% 
+  mutate(protocol = 1) %>% 
+  mutate(numProtocol = cumsum(protocol)) %>% 
+  mutate(lastProtocol = ifelse(numProtocol == max(numProtocol), 1, 0)) %>% 
+  filter(lastProtocol == 1)
+
+# Get rid of the nick names
+## "\\" escapes for special characters
+## "." is all characters
+## "*" is zero or more
+playerNames <- gsub(" \\/.*","", NBACovidTable$Relinquished)
+NBACovidTable$Relinquished <- playerNames
+rm(playerNames)
+
+```
+
+
+```{r player stats, message=FALSE}
+
+
+## Get game ids
+NBAgames <- game_logs(seasons = 2021)
+
+NBAgames <- select(NBAgames, c("dateGame","nameTeam","locationGame","slugTeam","slugOpponent",
+                                "outcomeGame","namePlayer","minutes",
+                               "treb","ast","stl","blk","tov","pf","pts","plusminus"))
+
+
+# Merge the dataframes together
+
+df1 <- merge(NBAgames, NBACovidTable, by.x = "namePlayer", by.y = "Relinquished",
+             all.x = T, all.y = F)
+
+# Keeping just df1
+rm(list=setdiff(ls(), "df1"))
+
+# Create some variables
+# Get time since event variable
+# Get time since event variable
+df1 <- df1 %>% 
+  group_by(slugTeam) %>% 
+  mutate(Dk = ifelse(is.na(Date), NA, as.Date(dateGame) - as.Date(Date)),
+         COVID = ifelse(is.na(Date), 0, 1)) %>% 
+  arrange(Dk)
+
+
+# Creating the dummies
+dayDummies <- dummy(df1$Dk)
+
+
+# Joining the matrix to the dataframe
+dfEvent <- data.frame(df1, dayDummies)
+
+
+
+```
+
+
+
+### Introduction
+
+There is some uncertainty on the effects of long-COVID on work productivity (CITE). We estimate the impact of long-COVID on trends in productivity through changes in points per game in the NBA. At the highest level of professional sports, athletes may be one of the closest things we can observe to the limit of physical performance. Competing at this level can also be demanding mentally. If long-COVID effects productivity through physical or mental wellbeing then we assume this would be observable through the performance of top-level athletes in the NBA.
+
+Unlike many other sports, players often score many points during a game in the NBAm giving us more variability. Additionally, the NBA plays 72 games in a season and basketball in particular requires a substantial sample size and increases the likelihood of observing any effects.
+
+Although we have the we have the benefit of having an abundance of data on NBA statistics available, one of our main limitations is that the NBA releases the names of the players who have had COVID-19. Instead we use injury reports showing when players were placed on covid protocol. This shows us the players who have potentially been exposed to the virus, but not neccessarily those who have had it. Therefore, we treat our estimates as a lower bound.
+
+### Descriptive Statistics
+
+From Table 1, we observe that players who have been placed on covid protocol typically score
+fewer points.
+
+```{r make table}
+
+
+# Convert characters to factors
+names <- c("namePlayer", "dateGame", 
+           "locationGame", "slugTeam", 
+           "slugOpponent")
+dfEvent[,names] <- lapply(dfEvent[,names], factor) # lapply functions like a for loop
+rm(names)
+
+# Descriptive stuff
+dfEvent$`COVID protocol` <- ifelse(dfEvent$COVID == 1, "yes", "no")
+
+tbl1 <- dfEvent %>% 
+  group_by(`COVID protocol`) %>% 
+  summarise(players = n(),
+            `mean pts` = mean(pts),
+            `std error` = sd(pts)/sqrt(players))
+
+kable(tbl1, "html", digits = 2, caption = "General Summary Statistics", booktabs = T, linesep = "") %>% 
+  kable_styling(latex_options = "hold_position")
+
+```
+
+#### Raw data trends
+
+Using a weight polynomial regressions (LOESS) with a span of 5% of the data we show the trends
+in points from players who were placed on covid protocol. From these results, there does not
+appear to be a trend in any direction after the players were placed on protocol.
+
+```{r raw data trends}
+df1 %>% filter(!is.na(Date)) %>% 
+  ggplot(mapping = aes(x = Dk, y = pts)) +
+  geom_point(colour = "snow3", size = 0.1) +
+  geom_smooth(aes(x = Dk, y = pts),
+              span = 0.10,
+              se = T,
+              fill = "skyblue",
+              method = "loess") +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "lightgrey") +
+  geom_vline(aes(xintercept = 0,
+                 colour = "indianred4"),
+             size = 0.1) +
+  guides(colour = F) +
+  labs(title = "Points in relation to COVID-19 protocol",
+       x = "days from COVID-19 protocol",
+       y = "points") +
+  theme_bw()
+```
+
+### Event study
+
+To estimate the impact of long-covid on points per game for NBA players we use the following model:
+
+(write model in latex)
+
+where:
+
+(more latex code)
+
+### Results
+
+From Figure 2, it doesn’t look like there is any trend at all. Maybe this is because long covid
+only effect around 1.5% of people and we observe 231 players who were placed on protocol. Who
+knows...
+
+```{r event study bins}
+
+# Create bins
+dfEvent <- dfEvent %>%
+  mutate(lower_bin = select(dfEvent, Dk.147:Dk.11) %>%
+           rowSums(na.rm = TRUE))    # 10 days of lags
+
+dfEvent <- dfEvent %>%
+  mutate(upper_bin = select(dfEvent, Dk51:Dk144) %>%
+           rowSums(na.rm = TRUE))    # 50 days of leads
+```
+
+```{r event study basic}
+# Run regression
+reg1 <- felm(pts ~
+                    # Time relative to events
+                    lower_bin +
+                    Dk.10 + Dk.9 + Dk.8 + Dk.7 + Dk.6 + Dk.5 + Dk.4 + Dk.3 + Dk.2 + Dk.1 +
+                    Dk1 + Dk2 + Dk3 + Dk4 + Dk5 + Dk6 + Dk7 + Dk8 + Dk9 + Dk10 +
+                    Dk11 + Dk12 + Dk13 + Dk14 + Dk15 + Dk16 + Dk17 + Dk18 + Dk19 +
+                    Dk20 + Dk21 + Dk22 + Dk23 + Dk24 + Dk25 + Dk26 + Dk27 + Dk28 +
+                    Dk29 + Dk30 + Dk31 + Dk32 + Dk33 + Dk34 + Dk35 + Dk36 + Dk37 +
+                    Dk38 + Dk39 + Dk40 + Dk41 + Dk42 + Dk43 + Dk44 + Dk45 + Dk46 +
+                    Dk47 + Dk48 + Dk49 + Dk50 +
+                    upper_bin
+                  |
+                    # Facility, year and day-of-year fixed-effects
+                    dateGame + locationGame + slugTeam + slugOpponent  |0|
+                    # No clustering
+                    0,
+                  weights = NULL,
+                  data = dfEvent)
+
+
+# Creating horizontal variable for figure
+x <- c(-10:-1, 1:50)
+
+
+# Getting the coefficients
+coef1 <- coef(reg1)[2:61]
+
+# Collecting the standard errors
+se <- as.numeric(summary(reg1, robust = F)$coef[2:61,2])
+
+
+# Normalizing origin
+origin <- data.frame(x = 0, coef1 = 0, se = 0)
+
+
+# Getting the event for plot
+event1 <- data.frame(x = x, coef1 = coef1, se = se)
+event1 <- rbind(event1, origin)
+
+
+ggplot(event1, aes(x = x, y = coef1)) +
+  geom_linerange(aes(ymin = coef1 - 1.96*se, ymax = coef1 + 1.96*se),
+                color = "royalblue") +
+  geom_point(color = "royalblue") +
+  geom_vline(xintercept = 0, color = "firebrick3") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+  labs(x = "days from protocol",
+       y = "change in points",
+       title = "Effect of COVID-19 on Player Point Productivity") +
+  # scale_x_continuous(breaks = seq(-10,100,10)) +
+  theme_bw()
+
+
+```
+
+
+#### Quantile regression
+Maybe there isn’t enough variation from the players with low point productivity. Lets try a
+quantile regression using a similar model to Model 1 using τ = 0.75. I don’t know about these
+results either.
+
+```{r quantile regression}
+# # Try quantile regression
+# Run regression
+# quant1 <- rq(pts ~
+#                # Time relative to events
+#                lower_bin +
+#                Dk.10 + Dk.9 + Dk.8 + Dk.7 + Dk.6 + Dk.5 + Dk.4 + Dk.3 + Dk.2 + Dk.1 +
+#                Dk1 + Dk2 + Dk3 + Dk4 + Dk5 + Dk6 + Dk7 + Dk8 + Dk9 + Dk10 +
+#                Dk11 + Dk12 + Dk13 + Dk14 + Dk15 + Dk16 + Dk17 + Dk18 + Dk19 +
+#                Dk20 + Dk21 + Dk22 + Dk23 + Dk24 + Dk25 + Dk26 + Dk27 + Dk28 +
+#                Dk29 + Dk30 + Dk31 + Dk32 + Dk33 + Dk34 + Dk35 + Dk36 + Dk37 +
+#                Dk38 + Dk39 + Dk40 + Dk41 + Dk42 + Dk43 + Dk44 + Dk45 + Dk46 +
+#                Dk47 + Dk48 + Dk49 + Dk50 +
+#                upper_bin +
+#                # Facility, year and day-of-year effects
+#                dateGame + locationGame + slugTeam + slugOpponent,
+#              weights = NULL,
+#              tau = 0.75,
+#              data = dfEvent)
+# 
+# # Creating horizontal variable for figure
+# x <- c(-10:-1, 1:50)
+# 
+# 
+# # Getting the coefficients
+# coef1 <- coef(quant1)[2:61]
+# 
+# # Collecting the standard errors
+# se <- as.numeric(summary(quant1, robust = F)$coef[2:61,2])
+# 
+# 
+# # Normalizing origin
+# origin <- data.frame(x = 0, coef1 = 0, se = 0)
+# 
+# 
+# # Getting the event for plot
+# event1 <- data.frame(x = x, coef1 = coef1, se = se)
+# event1 <- rbind(event1, origin)
+# 
+# 
+# ggplot(event1, aes(x = x, y = coef1)) +
+#   geom_linerange(aes(ymin = coef1 - 1.96*se, ymax = coef1 + 1.96*se),
+#                  color = "royalblue") +
+#   geom_point(color = "royalblue") +
+#   geom_vline(xintercept = 0, color = "firebrick3") +
+#   geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+#   labs(x = "days from protocol",
+#        y = "change in points",
+#        title = "Effect of COVID-19 on Player Point Productivity",
+#        subtitle = "For Players in the 75th Percentile of Scoring") +
+#   # scale_x_continuous(breaks = seq(-10,100,10)) +
+#   theme_bw()
+
+
+```
+
+
